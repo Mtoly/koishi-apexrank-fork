@@ -84,6 +84,40 @@ export interface RuntimeSettings {
   seasonKeywordDisabledGroups: string[]
 }
 
+export interface UserBindingRecord {
+  groupId: string
+  userId: string
+  lookupId: string
+  useUid: boolean
+  platform: string
+  playerName: string
+  uid: string
+  updatedAt: number
+}
+
+export interface ScoreChangeEvent {
+  groupId: string
+  playerKey: string
+  playerName: string
+  platform: string
+  oldScore: number
+  newScore: number
+  delta: number
+  observedAt: number
+}
+
+export interface LeaderboardEntry {
+  playerKey: string
+  playerName: string
+  platform: string
+  netDelta: number
+  changeCount: number
+  currentScore: number
+}
+
+export type LeaderboardPeriod = 'day' | 'week'
+export type LeaderboardDirection = 'up' | 'down'
+
 export const PLATFORM_SEARCH_ORDER = ['PC', 'PS4', 'X1', 'SWITCH'] as const
 
 export const NAME_MAP: Record<string, string> = {
@@ -153,6 +187,13 @@ export const SEASON_KEYWORD_COMMAND_BLOCKLIST = new Set([
   'apexseason',
   'apextest',
   'apexhelp',
+  'apexbind',
+  'apexunbind',
+  'apexscore',
+  'apexdayup',
+  'apexdaydown',
+  'apexweekup',
+  'apexweekdown',
   'apex帮助',
   'apexrankhelp',
   'apexblacklist',
@@ -160,6 +201,13 @@ export const SEASON_KEYWORD_COMMAND_BLOCKLIST = new Set([
   'apex列表',
   'apex移除',
   'apex查询',
+  'apex绑定',
+  'apex解绑',
+  'apex查分',
+  'apex日上分榜',
+  'apex日掉分榜',
+  'apex周上分榜',
+  'apex周掉分榜',
   '视奸',
   '持续视奸',
   '取消持续视奸',

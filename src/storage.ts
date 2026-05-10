@@ -3,9 +3,11 @@ import { dirname } from 'node:path'
 import {
   NotificationTarget,
   RuntimeSettings,
+  ScoreChangeEvent,
   StoredGroupRecord,
   StoredPlayerRecord,
   LoggerLike,
+  UserBindingRecord,
   coerceBool,
   normalizePlatform,
   toInt,
@@ -87,6 +89,38 @@ function normalizeGroupRecord(groupId: string, value: any): StoredGroupRecord | 
     groupId: normalizedGroupId,
     target,
     players,
+  }
+}
+
+function normalizeBindingRecord(groupId: string, userId: string, value: any): UserBindingRecord | null {
+  if (!value || typeof value !== 'object') return null
+  const lookupId = String(value.lookupId ?? value.lookup_id ?? '').trim()
+  if (!lookupId) return null
+  return {
+    groupId: String(value.groupId ?? value.group_id ?? groupId).trim() || groupId,
+    userId: String(value.userId ?? value.user_id ?? userId).trim() || userId,
+    lookupId,
+    useUid: coerceBool(value.useUid ?? value.use_uid, false),
+    platform: normalizePlatform(String(value.platform ?? 'PC')),
+    playerName: String(value.playerName ?? value.player_name ?? lookupId).trim() || lookupId,
+    uid: String(value.uid ?? '').trim(),
+    updatedAt: toInt(value.updatedAt ?? value.updated_at) ?? 0,
+  }
+}
+
+function normalizeScoreChangeEvent(groupId: string, value: any): ScoreChangeEvent | null {
+  if (!value || typeof value !== 'object') return null
+  const playerKey = String(value.playerKey ?? value.player_key ?? '').trim()
+  if (!playerKey) return null
+  return {
+    groupId: String(value.groupId ?? value.group_id ?? groupId).trim() || groupId,
+    playerKey,
+    playerName: String(value.playerName ?? value.player_name ?? '').trim(),
+    platform: normalizePlatform(String(value.platform ?? 'PC')),
+    oldScore: toInt(value.oldScore ?? value.old_score) ?? 0,
+    newScore: toInt(value.newScore ?? value.new_score) ?? 0,
+    delta: toInt(value.delta) ?? 0,
+    observedAt: toInt(value.observedAt ?? value.observed_at) ?? 0,
   }
 }
 
@@ -204,5 +238,139 @@ export class SettingsStore {
       runtime_blacklist: Array.from(new Set(settings.runtimeBlacklist)).sort(),
       season_keyword_disabled_groups: Array.from(new Set(settings.seasonKeywordDisabledGroups)).sort(),
     })
+  }
+}
+
+export class BindingStore {
+  private bindings: Record<string, Record<string, UserBindingRecord>> = {}
+
+  constructor(private readonly filePath: string, private readonly logger: LoggerLike) {}
+
+  async load() {
+    try {
+      const raw = JSON.parse(await readFile(this.filePath, 'utf8'))
+      if (!raw || typeof raw !== 'object') return
+      this.bindings = {}
+      for (const [groupId, users] of Object.entries(raw)) {
+        if (!users || typeof users !== 'object') continue
+        const normalizedUsers: Record<string, UserBindingRecord> = {}
+        for (const [userId, value] of Object.entries(users)) {
+          const normalized = normalizeBindingRecord(groupId, userId, value)
+          if (!normalized) continue
+          normalizedUsers[userId] = normalized
+        }
+        if (Object.keys(normalizedUsers).length) {
+          this.bindings[groupId] = normalizedUsers
+        }
+      }
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') {
+        this.logger.error(`加载 bindings.json 失败: ${error?.message || error}`)
+      }
+    }
+  }
+
+  async save() {
+    const payload = Object.fromEntries(
+      Object.entries(this.bindings).map(([groupId, users]) => [
+        groupId,
+        Object.fromEntries(
+          Object.entries(users).map(([userId, record]) => [
+            userId,
+            {
+              groupId: record.groupId,
+              userId: record.userId,
+              lookupId: record.lookupId,
+              useUid: record.useUid,
+              platform: record.platform,
+              playerName: record.playerName,
+              uid: record.uid,
+              updatedAt: record.updatedAt,
+            },
+          ]),
+        ),
+      ]),
+    )
+    await writeJsonAtomic(this.filePath, payload)
+  }
+
+  getBinding(groupId: string, userId: string) {
+    return this.bindings[groupId]?.[userId]
+  }
+
+  setBinding(groupId: string, userId: string, record: UserBindingRecord) {
+    if (!this.bindings[groupId]) this.bindings[groupId] = {}
+    this.bindings[groupId][userId] = { ...record }
+  }
+
+  removeBinding(groupId: string, userId: string) {
+    const users = this.bindings[groupId]
+    if (!users?.[userId]) return false
+    delete users[userId]
+    if (!Object.keys(users).length) delete this.bindings[groupId]
+    return true
+  }
+}
+
+export class HistoryStore {
+  private history: Record<string, ScoreChangeEvent[]> = {}
+
+  constructor(private readonly filePath: string, private readonly logger: LoggerLike) {}
+
+  async load() {
+    try {
+      const raw = JSON.parse(await readFile(this.filePath, 'utf8'))
+      if (!raw || typeof raw !== 'object') return
+      this.history = {}
+      for (const [groupId, events] of Object.entries(raw)) {
+        if (!Array.isArray(events)) continue
+        const normalizedEvents = events
+          .map((value) => normalizeScoreChangeEvent(groupId, value))
+          .filter((value): value is ScoreChangeEvent => Boolean(value))
+        if (normalizedEvents.length) {
+          this.history[groupId] = normalizedEvents
+        }
+      }
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') {
+        this.logger.error(`加载 history.json 失败: ${error?.message || error}`)
+      }
+    }
+  }
+
+  async save() {
+    const payload = Object.fromEntries(
+      Object.entries(this.history).map(([groupId, events]) => [
+        groupId,
+        events.map((event) => ({
+          groupId: event.groupId,
+          playerKey: event.playerKey,
+          playerName: event.playerName,
+          platform: event.platform,
+          oldScore: event.oldScore,
+          newScore: event.newScore,
+          delta: event.delta,
+          observedAt: event.observedAt,
+        })),
+      ]),
+    )
+    await writeJsonAtomic(this.filePath, payload)
+  }
+
+  getGroupEvents(groupId: string) {
+    return this.history[groupId] ? [...this.history[groupId]] : []
+  }
+
+  appendEvent(groupId: string, event: ScoreChangeEvent) {
+    if (!this.history[groupId]) this.history[groupId] = []
+    this.history[groupId].push({ ...event })
+  }
+
+  pruneOlderThan(timestamp: number) {
+    for (const [groupId, events] of Object.entries(this.history)) {
+      const nextEvents = events.filter((event) => event.observedAt >= timestamp)
+      if (nextEvents.length) this.history[groupId] = nextEvents
+      else delete this.history[groupId]
+    }
   }
 }
