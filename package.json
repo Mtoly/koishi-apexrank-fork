@@ -1,14 +1,26 @@
 {
   "name": "koishi-plugin-apexrankwatch",
-  "description": "用于查询 Apex 玩家段位、等级、赛季结束时间、大师猎杀人数与底分，并支持持续自动监测分数变化通知的 Koishi 插件",
-  "version": "1.1.7",
+  "description": "用于查询 Apex 玩家段位、地图轮换、赛季时间、猎杀线，并支持群内持续监控与图片化通知的 Koishi 插件",
+  "version": "2.0.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
-    "lib"
+    "lib",
+    "assets"
   ],
   "license": "MIT",
   "author": "moeneri",
+  "contributors": [
+    "moeneri"
+  ],
+  "homepage": "https://github.com/moeneri/koishi-plugin-apexrankwatch#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moeneri/koishi-plugin-apexrankwatch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/moeneri/koishi-plugin-apexrankwatch/issues"
+  },
   "keywords": [
     "apex",
     "apex-legends",
@@ -19,13 +31,27 @@
     "tracker"
   ],
   "scripts": {
-    "build": "tsc -b tsconfig.json && esbuild src/index.ts --bundle --platform=node --format=cjs --target=node18 --outfile=lib/index.js --external:koishi",
-    "test": "tsx --test test/*.test.ts"
+    "build": "tsc -p tsconfig.json && esbuild src/index.ts --bundle --platform=node --format=cjs --target=node18 --outfile=lib/index.js --external:koishi --external:@napi-rs/canvas",
+    "test": "tsx --test test/*.test.ts",
+    "test:live": "tsx --test test/live.test.ts"
   },
   "peerDependencies": {
     "koishi": "^4.18.7"
   },
+  "engines": {
+    "node": ">=18"
+  },
+  "koishi": {
+    "description": {
+      "zh": "查询 Apex 玩家段位、地图轮换、赛季时间、猎杀线，并支持群内持续监控与图片化通知。",
+      "en": "Query Apex Legends ranks, map rotations, seasons, predator thresholds, and watch rank changes with image notifications."
+    }
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.0"
+  },
   "devDependencies": {
+    "@koishijs/plugin-mock": "^2.6.6",
     "esbuild": "^0.23.1",
     "tsx": "^4.16.2",
     "typescript": "^5.6.2",

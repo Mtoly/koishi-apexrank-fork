@@ -25,6 +25,24 @@ export interface ApexPlayerStats {
   platform: string
 }
 
+export interface MapRotationEntry {
+  start: number | null
+  end: number | null
+  mapName: string
+  mapNameZh: string
+  remainingTimer: string
+}
+
+export interface MapRotationMode {
+  current: MapRotationEntry | null
+  next: MapRotationEntry | null
+}
+
+export interface MapRotationInfo {
+  ranked: MapRotationMode
+  battleRoyale: MapRotationMode
+}
+
 export interface PredatorPlatformInfo {
   platform: string
   requiredRp: number | null
@@ -48,6 +66,7 @@ export interface SeasonInfo {
   seasonUrl: string
   startIso: string
   endIso: string
+  statusText?: string
 }
 
 export interface NotificationTarget {
@@ -85,7 +104,6 @@ export interface RuntimeSettings {
 }
 
 export interface UserBindingRecord {
-  groupId: string
   userId: string
   lookupId: string
   useUid: boolean
@@ -95,28 +113,29 @@ export interface UserBindingRecord {
   updatedAt: number
 }
 
-export interface ScoreChangeEvent {
+export interface ScoreHistoryEntry {
   groupId: string
   playerKey: string
   playerName: string
+  remarkSnapshot?: string
+  displayNameSnapshot: string
   platform: string
   oldScore: number
   newScore: number
   delta: number
-  observedAt: number
+  recordedAt: number
 }
 
 export interface LeaderboardEntry {
   playerKey: string
   playerName: string
+  remarkSnapshot?: string
+  displayName: string
   platform: string
   netDelta: number
-  changeCount: number
-  currentScore: number
+  latestScore: number
+  latestRecordedAt: number
 }
-
-export type LeaderboardPeriod = 'day' | 'week'
-export type LeaderboardDirection = 'up' | 'down'
 
 export const PLATFORM_SEARCH_ORDER = ['PC', 'PS4', 'X1', 'SWITCH'] as const
 
@@ -149,7 +168,7 @@ export const NAME_MAP: Record<string, string> = {
   Pathfinder: '探路者',
   Wraith: '恶灵',
   Bangalore: '班加罗尔',
-  Caustic: '腐蚀',
+  Caustic: '侵蚀',
   Mirage: '幻象',
   Octane: '动力小子',
   Wattson: '沃特森',
@@ -168,8 +187,16 @@ export const NAME_MAP: Record<string, string> = {
   Catalyst: '卡特莉丝',
   Ballistic: '弹道',
   Conduit: '导管',
-  Alter: '幻影',
-  Sparrow: '麻雀',
+  Alter: '变幻',
+  Sparrow: '琉雀',
+  Axle: '艾克赛尔',
+  'Broken Moon': '残月',
+  'Kings Canyon': '诸王峡谷',
+  Olympus: '奥林匹斯',
+  "World's Edge": '世界尽头',
+  'Worlds Edge': '世界尽头',
+  'Storm Point': '风暴点',
+  'E-District': '电力区',
   'BR Kills': '击杀数',
   'BR Wins': '胜场数',
   'BR Damage': '造成伤害',
@@ -187,13 +214,6 @@ export const SEASON_KEYWORD_COMMAND_BLOCKLIST = new Set([
   'apexseason',
   'apextest',
   'apexhelp',
-  'apexbind',
-  'apexunbind',
-  'apexscore',
-  'apexdayup',
-  'apexdaydown',
-  'apexweekup',
-  'apexweekdown',
   'apex帮助',
   'apexrankhelp',
   'apexblacklist',
@@ -201,13 +221,6 @@ export const SEASON_KEYWORD_COMMAND_BLOCKLIST = new Set([
   'apex列表',
   'apex移除',
   'apex查询',
-  'apex绑定',
-  'apex解绑',
-  'apex查分',
-  'apex日上分榜',
-  'apex日掉分榜',
-  'apex周上分榜',
-  'apex周掉分榜',
   '视奸',
   '持续视奸',
   '取消持续视奸',
@@ -222,8 +235,18 @@ export const SEASON_KEYWORD_COMMAND_BLOCKLIST = new Set([
   '赛季开启',
 ])
 
+function normalizeTranslationKey(value: unknown) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '')
+}
+
+const NORMALIZED_NAME_MAP: Record<string, string> = Object.fromEntries(
+  Object.entries(NAME_MAP).map(([key, value]) => [normalizeTranslationKey(key), value]),
+)
+
 export function translate(name: string) {
-  return NAME_MAP[name] || name
+  const text = String(name || '').trim()
+  if (!text) return text
+  return NAME_MAP[text] || NORMALIZED_NAME_MAP[normalizeTranslationKey(text)] || text
 }
 
 export function translateState(stateText: unknown) {
@@ -315,6 +338,87 @@ export function buildPlayerKey(lookupId: string, platform: string, useUid: boole
   return `${prefix}${lookupId.trim().toLowerCase()}@${normalizePlatform(platform)}`
 }
 
+export function formatLookupIdentifier(lookupId: string, useUid: boolean) {
+  const normalized = String(lookupId || '').trim()
+  if (!normalized) return ''
+  return useUid ? `uid:${normalized}` : normalized
+}
+
+export function sanitizeRemark(value: unknown, maxLength = 32) {
+  return String(value || '')
+    .replace(/[\r\n\t\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength)
+}
+
+export function formatPlayerDisplayName(playerName: string, remark?: string, includeOriginal = true) {
+  const normalizedPlayerName = String(playerName || '').trim() || '未知玩家'
+  const normalizedRemark = sanitizeRemark(remark)
+  if (!normalizedRemark) return normalizedPlayerName
+  if (!includeOriginal || normalizedRemark === normalizedPlayerName) return normalizedRemark
+  return `${normalizedRemark} (${normalizedPlayerName})`
+}
+
+const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000
+const DAY_MS = 24 * 60 * 60 * 1000
+
+export function getBeijingDayStartTimestamp(now = Date.now()) {
+  const shifted = now + BEIJING_OFFSET_MS
+  return Math.floor(shifted / DAY_MS) * DAY_MS - BEIJING_OFFSET_MS
+}
+
+export function getBeijingWeekStartTimestamp(now = Date.now()) {
+  const dayStart = getBeijingDayStartTimestamp(now)
+  const shifted = dayStart + BEIJING_OFFSET_MS
+  const weekday = new Date(shifted).getUTCDay()
+  const daysSinceMonday = (weekday + 6) % 7
+  return dayStart - daysSinceMonday * DAY_MS
+}
+
+export function getBeijingLeaderboardRange(period: 'day' | 'week', now = Date.now()) {
+  const start = period === 'day' ? getBeijingDayStartTimestamp(now) : getBeijingWeekStartTimestamp(now)
+  return {
+    start,
+    endExclusive: now + 1,
+  }
+}
+
+export function isTimestampInRange(timestamp: number, start: number, endExclusive: number) {
+  return timestamp >= start && timestamp < endExclusive
+}
+
+export function summarizeLeaderboard(entries: ScoreHistoryEntry[]) {
+  const aggregated = new Map<string, LeaderboardEntry>()
+  for (const entry of entries) {
+    const existing = aggregated.get(entry.playerKey)
+    if (!existing) {
+      aggregated.set(entry.playerKey, {
+        playerKey: entry.playerKey,
+        playerName: entry.playerName,
+        remarkSnapshot: entry.remarkSnapshot,
+        displayName: entry.displayNameSnapshot || formatPlayerDisplayName(entry.playerName, entry.remarkSnapshot),
+        platform: entry.platform,
+        netDelta: entry.delta,
+        latestScore: entry.newScore,
+        latestRecordedAt: entry.recordedAt,
+      })
+      continue
+    }
+
+    existing.netDelta += entry.delta
+    if (entry.recordedAt >= existing.latestRecordedAt) {
+      existing.playerName = entry.playerName
+      existing.remarkSnapshot = entry.remarkSnapshot
+      existing.displayName = entry.displayNameSnapshot || formatPlayerDisplayName(entry.playerName, entry.remarkSnapshot)
+      existing.platform = entry.platform
+      existing.latestScore = entry.newScore
+      existing.latestRecordedAt = entry.recordedAt
+    }
+  }
+  return Array.from(aggregated.values())
+}
+
 export function toInt(value: unknown): number | null {
   if (value === null || value === undefined || value === '') return null
   if (typeof value === 'boolean') return Number(value)
@@ -370,7 +474,8 @@ export function formatPlatform(platform: string) {
 }
 
 export function formatRank(rankName: string, rankDiv: number) {
-  return rankDiv ? `${rankName} ${rankDiv}` : rankName
+  const translated = translate(rankName)
+  return rankDiv ? `${translated} ${rankDiv}` : translated
 }
 
 export function maskSecret(value: unknown) {

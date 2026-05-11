@@ -2,6 +2,8 @@ import {
   ApexPlayerStats,
   LegendKillsRank,
   LoggerLike,
+  MapRotationEntry,
+  MapRotationInfo,
   PLATFORM_SEARCH_ORDER,
   PredatorInfo,
   PredatorPlatformInfo,
@@ -31,6 +33,10 @@ function withTimeout(timeoutMs: number) {
 }
 
 export class ApexApiClient {
+  static serializeDebugPayload(payload: unknown) {
+    return serializePayload(sanitizeDebugPayload(payload))
+  }
+
   constructor(
     private readonly options: {
       apiKey: string
@@ -126,6 +132,50 @@ export class ApexApiClient {
     return { mode, platforms }
   }
 
+  async fetchMapRotationInfo(): Promise<MapRotationInfo> {
+    const url = new URL('https://api.mozambiquehe.re/maprotation')
+    url.searchParams.set('auth', this.options.apiKey)
+    url.searchParams.set('version', '2')
+    const { data, status } = await this.requestJson(url.toString())
+    if (status === 401 || status === 403 || isInvalidApiKey(data)) {
+      throw new Error('Invalid API key')
+    }
+    return parseMapRotationInfo(data)
+  }
+
+  async fetchSeasonInfo(seasonNumber?: number | null): Promise<SeasonInfo> {
+    if (seasonNumber === undefined || seasonNumber === null) {
+      const html = await this.requestText('https://apexlegendsstatus.com/new-season-countdown')
+      return parseApexStatusCurrentSeasonInfo(html)
+    }
+
+    const homeUrl = 'https://apexseasons.online/'
+    const homeHtml = await this.requestText(homeUrl)
+    const references = extractSeasonReferences(homeHtml)
+    const target = references.find((entry) => entry.seasonNumber === seasonNumber)
+    if (!target) throw new Error(`未找到 S${seasonNumber} 的赛季数据`)
+    const detailHtml = target.seasonUrl ? await this.requestText(target.seasonUrl) : ''
+    const seasonInfo: SeasonInfo = {
+      seasonNumber: target.seasonNumber,
+      seasonName: target.seasonName,
+      startDate: '未知',
+      endDate: '未知',
+      timezone: '未知',
+      updateTimeHint: '未知',
+      source: 'apexseasons.online',
+      seasonUrl: target.seasonUrl,
+      startIso: '',
+      endIso: '',
+    }
+    applySeasonPageOverrides(seasonInfo, detailHtml)
+    seasonInfo.statusText = seasonStatusText(seasonInfo.startIso, seasonInfo.endIso)
+    if (!seasonInfo.startIso && !seasonInfo.endIso) {
+      const fallback = parseCurrentSeason(homeHtml)
+      if (fallback.seasonNumber === seasonNumber) return fallback
+    }
+    return seasonInfo
+  }
+
   async fetchCurrentSeasonInfo(): Promise<SeasonInfo> {
     const homeUrl = 'https://apexseasons.online/'
     const homeHtml = await this.requestText(homeUrl)
@@ -135,6 +185,7 @@ export class ApexApiClient {
       try {
         const detailHtml = await this.requestText(seasonInfo.seasonUrl)
         applySeasonPageOverrides(seasonInfo, detailHtml)
+        seasonInfo.statusText = seasonStatusText(seasonInfo.startIso, seasonInfo.endIso)
       } catch (error: any) {
         this.options.logger.warn(`获取赛季详情页失败: ${error?.message || error}`)
       }
@@ -167,7 +218,7 @@ export class ApexApiClient {
       const timeout = withTimeout(this.options.timeoutMs)
       try {
         const headers: HeadersInit = {
-          'User-Agent': 'Koishi-ApexRankWatch/1.1.6',
+          'User-Agent': 'Koishi-ApexRankWatch/2.0.0',
           ...(extraHeaders || {}),
         }
         this.debugLogRequest('JSON', url, headers)
@@ -210,7 +261,7 @@ export class ApexApiClient {
       const timeout = withTimeout(this.options.timeoutMs)
       try {
         const headers: HeadersInit = {
-          'User-Agent': 'Koishi-ApexRankWatch/1.1.6',
+          'User-Agent': 'Koishi-ApexRankWatch/2.0.0',
         }
         this.debugLogRequest('TEXT', url, headers)
         const response = await this.fetcher(url, { method: 'GET', headers, signal: timeout.signal })
@@ -239,7 +290,7 @@ export class ApexApiClient {
 
   private debugLogResponse(kind: string, url: string, payload: unknown, status: number) {
     if (!this.options.debugLogging) return
-    const preview = serializePayload(payload)
+    const preview = ApexApiClient.serializeDebugPayload(payload)
     this.options.logger.info(`[DEBUG] ${kind} 响应 <= url=${url}, status=${status}, payload=${preview}`)
   }
 
@@ -263,6 +314,27 @@ function serializeHeaders(headers?: HeadersInit) {
 function serializePayload(payload: unknown) {
   const text = typeof payload === 'string' ? payload : JSON.stringify(payload)
   return text.length > 4000 ? `${text.slice(0, 4000)}...(truncated)` : text
+}
+
+function sanitizeDebugPayload(payload: unknown, key = ''): unknown {
+  if (payload === null || payload === undefined) return payload
+  const normalizedKey = normalizeKeyName(key)
+  if (['auth', 'authorization', 'apikey', 'api_key', 'token', 'secret', 'password', 'cookie'].some((candidate) => normalizedKey.includes(normalizeKeyName(candidate)))) {
+    return maskSecret(payload)
+  }
+  if (['uid', 'uuid', 'userid', 'groupid', 'player', 'playername', 'name', 'displayname'].includes(normalizedKey)) {
+    return '***'
+  }
+  if (Array.isArray(payload)) return payload.map((item) => sanitizeDebugPayload(item, key))
+  if (typeof payload === 'object') {
+    return Object.fromEntries(Object.entries(payload).map(([nestedKey, value]) => [nestedKey, sanitizeDebugPayload(value, nestedKey)]))
+  }
+  if (typeof payload === 'string') {
+    return payload
+      .replace(/(auth|api[_-]?key|token)=([^&\s]+)/gi, '$1=***')
+      .replace(/(player|uid|uuid|name)=([^&\s]+)/gi, '$1=***')
+  }
+  return payload
 }
 
 function retryDelay(attempt: number) {
@@ -380,6 +452,33 @@ function parsePredatorPlatforms(payload: Record<string, any>): PredatorPlatformI
   return result
 }
 
+function parseMapRotationInfo(data: any): MapRotationInfo {
+  return {
+    ranked: parseMapRotationMode(data?.ranked),
+    battleRoyale: parseMapRotationMode(data?.battle_royale ?? data?.battleRoyale ?? data?.battle_royale_pub),
+  }
+}
+
+function parseMapRotationMode(data: any) {
+  return {
+    current: parseMapRotationEntry(data?.current),
+    next: parseMapRotationEntry(data?.next),
+  }
+}
+
+function parseMapRotationEntry(data: any): MapRotationEntry | null {
+  if (!data || typeof data !== 'object') return null
+  const mapName = String(data.map ?? data.mapName ?? data.name ?? '').trim()
+  if (!mapName) return null
+  return {
+    start: toInt(data.start ?? data.startTimestamp ?? data.start_time),
+    end: toInt(data.end ?? data.endTimestamp ?? data.end_time),
+    mapName,
+    mapNameZh: translate(mapName),
+    remainingTimer: String(data.remainingTimer ?? data.remaining_timer ?? '').trim(),
+  }
+}
+
 function getFirstInt(data: any, ...candidates: string[]) {
   if (!data || typeof data !== 'object') return null
   for (const candidate of candidates) {
@@ -411,6 +510,103 @@ function findFirstIntByCandidates(value: any, normalizedCandidates: Set<string>)
     if (numeric !== null) return numeric
   }
   return null
+}
+
+type SeasonReference = {
+  seasonNumber: number
+  seasonName: string
+  seasonUrl: string
+}
+
+function extractSeasonReferences(html: string): SeasonReference[] {
+  const blocks = Array.from(html.matchAll(/<script\s+type="application\/ld\+json">(.*?)<\/script>/gis)).map((match) => match[1])
+  const references: SeasonReference[] = []
+  for (const block of blocks) {
+    const trimmed = block.trim()
+    if (!trimmed) continue
+    let parsed: any
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    const candidates = Array.isArray(parsed) ? parsed : [parsed]
+    for (const item of candidates) {
+      const elements = Array.isArray(item?.itemListElement) ? item.itemListElement : []
+      for (const element of elements) {
+        const [seasonNumber, seasonName] = parseSeasonName(String(element?.name ?? ''))
+        if (seasonNumber === null) continue
+        references.push({
+          seasonNumber,
+          seasonName,
+          seasonUrl: String(element?.url ?? ''),
+        })
+      }
+    }
+  }
+  return references
+}
+
+function parseApexStatusCurrentSeasonInfo(html: string, now = new Date()): SeasonInfo {
+  const [seasonNumber, seasonName] = extractApexStatusSeasonTitle(html)
+  const startTimestamp = extractApexStatusStartTimestamp(html)
+  const start = startTimestamp ? new Date(startTimestamp * 1000) : null
+  const end = start ? new Date(start.getTime() + 91 * 24 * 60 * 60 * 1000) : null
+
+  const startIso = start ? toIso(start) : ''
+  const endIso = end ? toIso(end) : ''
+
+  return {
+    seasonNumber,
+    seasonName,
+    startDate: start ? formatBeijingDate(start) : '未知',
+    endDate: end ? formatBeijingDate(end) : '未知',
+    timezone: 'Asia/Shanghai',
+    updateTimeHint: '',
+    source: 'apexlegendsstatus.com',
+    seasonUrl: 'https://apexlegendsstatus.com/new-season-countdown',
+    startIso,
+    endIso,
+    statusText: seasonStatusText(startIso, endIso, now),
+  }
+}
+
+function extractApexStatusSeasonTitle(html: string): [number | null, string] {
+  const titleMatch =
+    html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)
+    || html.match(/<title[^>]*>(.*?)<\/title>/is)
+    || html.match(/Countdown to Season\s+\d+[^<\n]*/i)
+  const title = String(titleMatch?.[1] ?? titleMatch?.[0] ?? '')
+  const match = title.match(/Season\s+(\d+)(?::|\s+[·•-])?\s*([^<"]*)/i)
+  if (!match) return [null, '']
+  return [toInt(match[1]), match[2].replace(/^[-:·•\s]+/, '').trim()]
+}
+
+function extractApexStatusStartTimestamp(html: string) {
+  const match =
+    html.match(/\bstartTime\s*=\s*(\d{10})\b/i)
+    || html.match(/"startTime"\s*:\s*(\d{10})/i)
+  return toInt(match?.[1])
+}
+
+function toIso(date: Date) {
+  return date.toISOString().replace('.000Z', 'Z')
+}
+
+function formatBeijingDate(date: Date) {
+  const beijing = new Date(date.getTime() + 8 * 60 * 60 * 1000)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${beijing.getUTCFullYear()}-${pad(beijing.getUTCMonth() + 1)}-${pad(beijing.getUTCDate())} ${pad(beijing.getUTCHours())}:${pad(beijing.getUTCMinutes())} 北京时间`
+}
+
+function seasonStatusText(startIso: string, endIso: string, now = new Date()) {
+  const start = new Date(startIso).getTime()
+  const end = new Date(endIso).getTime()
+  const current = now.getTime()
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return '未知'
+  if (current < start) return '未开始'
+  if (current > end) return '已结束'
+  return '进行中'
 }
 
 function parseCurrentSeason(html: string): SeasonInfo {
@@ -463,6 +659,7 @@ function parseCurrentSeason(html: string): SeasonInfo {
     seasonUrl,
     startIso,
     endIso,
+    statusText: seasonStatusText(startIso, endIso),
   }
 }
 

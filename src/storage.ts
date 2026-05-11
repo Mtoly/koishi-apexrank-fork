@@ -3,13 +3,14 @@ import { dirname } from 'node:path'
 import {
   NotificationTarget,
   RuntimeSettings,
-  ScoreChangeEvent,
   StoredGroupRecord,
   StoredPlayerRecord,
   LoggerLike,
+  ScoreHistoryEntry,
   UserBindingRecord,
   coerceBool,
   normalizePlatform,
+  sanitizeRemark,
   toInt,
 } from './shared'
 
@@ -65,7 +66,7 @@ function normalizePlayerRecord(value: any): StoredPlayerRecord | null {
     globalRankPercent: String(value.globalRankPercent ?? value.global_rank_percent ?? '未知').trim() || '未知',
     selectedLegend: String(value.selectedLegend ?? value.selected_legend ?? '').trim(),
     legendKillsPercent,
-    remark: value.remark ? String(value.remark).trim() : undefined,
+    remark: sanitizeRemark(value.remark),
   }
 }
 
@@ -92,13 +93,13 @@ function normalizeGroupRecord(groupId: string, value: any): StoredGroupRecord | 
   }
 }
 
-function normalizeBindingRecord(groupId: string, userId: string, value: any): UserBindingRecord | null {
+function normalizeBindingRecord(userId: string, value: any): UserBindingRecord | null {
   if (!value || typeof value !== 'object') return null
+  const normalizedUserId = String(value.userId ?? value.user_id ?? userId).trim() || userId
   const lookupId = String(value.lookupId ?? value.lookup_id ?? '').trim()
-  if (!lookupId) return null
+  if (!normalizedUserId || !lookupId) return null
   return {
-    groupId: String(value.groupId ?? value.group_id ?? groupId).trim() || groupId,
-    userId: String(value.userId ?? value.user_id ?? userId).trim() || userId,
+    userId: normalizedUserId,
     lookupId,
     useUid: coerceBool(value.useUid ?? value.use_uid, false),
     platform: normalizePlatform(String(value.platform ?? 'PC')),
@@ -108,19 +109,29 @@ function normalizeBindingRecord(groupId: string, userId: string, value: any): Us
   }
 }
 
-function normalizeScoreChangeEvent(groupId: string, value: any): ScoreChangeEvent | null {
+function normalizeScoreHistoryEntry(value: any): ScoreHistoryEntry | null {
   if (!value || typeof value !== 'object') return null
+  const groupId = String(value.groupId ?? value.group_id ?? '').trim()
   const playerKey = String(value.playerKey ?? value.player_key ?? '').trim()
-  if (!playerKey) return null
+  const playerName = String(value.playerName ?? value.player_name ?? '').trim()
+  if (!groupId || !playerKey || !playerName) return null
+  const platform = normalizePlatform(String(value.platform ?? 'PC'))
+  const oldScore = toInt(value.oldScore ?? value.old_score)
+  const newScore = toInt(value.newScore ?? value.new_score)
+  const delta = toInt(value.delta)
+  const recordedAt = toInt(value.recordedAt ?? value.recorded_at) ?? 0
+  if (oldScore === null || newScore === null || delta === null || !recordedAt) return null
   return {
-    groupId: String(value.groupId ?? value.group_id ?? groupId).trim() || groupId,
+    groupId,
     playerKey,
-    playerName: String(value.playerName ?? value.player_name ?? '').trim(),
-    platform: normalizePlatform(String(value.platform ?? 'PC')),
-    oldScore: toInt(value.oldScore ?? value.old_score) ?? 0,
-    newScore: toInt(value.newScore ?? value.new_score) ?? 0,
-    delta: toInt(value.delta) ?? 0,
-    observedAt: toInt(value.observedAt ?? value.observed_at) ?? 0,
+    playerName,
+    remarkSnapshot: sanitizeRemark(value.remarkSnapshot ?? value.remark_snapshot) || undefined,
+    displayNameSnapshot: String(value.displayNameSnapshot ?? value.display_name_snapshot ?? playerName).trim() || playerName,
+    platform,
+    oldScore,
+    newScore,
+    delta,
+    recordedAt,
   }
 }
 
@@ -242,7 +253,7 @@ export class SettingsStore {
 }
 
 export class BindingStore {
-  private bindings: Record<string, Record<string, UserBindingRecord>> = {}
+  private bindings: Record<string, UserBindingRecord> = {}
 
   constructor(private readonly filePath: string, private readonly logger: LoggerLike) {}
 
@@ -251,17 +262,10 @@ export class BindingStore {
       const raw = JSON.parse(await readFile(this.filePath, 'utf8'))
       if (!raw || typeof raw !== 'object') return
       this.bindings = {}
-      for (const [groupId, users] of Object.entries(raw)) {
-        if (!users || typeof users !== 'object') continue
-        const normalizedUsers: Record<string, UserBindingRecord> = {}
-        for (const [userId, value] of Object.entries(users)) {
-          const normalized = normalizeBindingRecord(groupId, userId, value)
-          if (!normalized) continue
-          normalizedUsers[userId] = normalized
-        }
-        if (Object.keys(normalizedUsers).length) {
-          this.bindings[groupId] = normalizedUsers
-        }
+      for (const [userId, value] of Object.entries(raw)) {
+        const normalized = normalizeBindingRecord(userId, value)
+        if (!normalized) continue
+        this.bindings[normalized.userId] = normalized
       }
     } catch (error: any) {
       if (error?.code !== 'ENOENT') {
@@ -271,106 +275,59 @@ export class BindingStore {
   }
 
   async save() {
-    const payload = Object.fromEntries(
-      Object.entries(this.bindings).map(([groupId, users]) => [
-        groupId,
-        Object.fromEntries(
-          Object.entries(users).map(([userId, record]) => [
-            userId,
-            {
-              groupId: record.groupId,
-              userId: record.userId,
-              lookupId: record.lookupId,
-              useUid: record.useUid,
-              platform: record.platform,
-              playerName: record.playerName,
-              uid: record.uid,
-              updatedAt: record.updatedAt,
-            },
-          ]),
-        ),
-      ]),
-    )
-    await writeJsonAtomic(this.filePath, payload)
+    await writeJsonAtomic(this.filePath, this.bindings)
   }
 
-  getBinding(groupId: string, userId: string) {
-    return this.bindings[groupId]?.[userId]
+  get(userId: string) {
+    return this.bindings[userId]
   }
 
-  setBinding(groupId: string, userId: string, record: UserBindingRecord) {
-    if (!this.bindings[groupId]) this.bindings[groupId] = {}
-    this.bindings[groupId][userId] = { ...record }
+  set(record: UserBindingRecord) {
+    this.bindings[record.userId] = { ...record }
   }
 
-  removeBinding(groupId: string, userId: string) {
-    const users = this.bindings[groupId]
-    if (!users?.[userId]) return false
-    delete users[userId]
-    if (!Object.keys(users).length) delete this.bindings[groupId]
+  remove(userId: string) {
+    if (!this.bindings[userId]) return false
+    delete this.bindings[userId]
     return true
   }
 }
 
-export class HistoryStore {
-  private history: Record<string, ScoreChangeEvent[]> = {}
+export class ScoreHistoryStore {
+  private entries: ScoreHistoryEntry[] = []
 
-  constructor(private readonly filePath: string, private readonly logger: LoggerLike) {}
+  constructor(private readonly filePath: string, private readonly logger: LoggerLike, private readonly retentionDays = 90) {}
 
   async load() {
     try {
       const raw = JSON.parse(await readFile(this.filePath, 'utf8'))
-      if (!raw || typeof raw !== 'object') return
-      this.history = {}
-      for (const [groupId, events] of Object.entries(raw)) {
-        if (!Array.isArray(events)) continue
-        const normalizedEvents = events
-          .map((value) => normalizeScoreChangeEvent(groupId, value))
-          .filter((value): value is ScoreChangeEvent => Boolean(value))
-        if (normalizedEvents.length) {
-          this.history[groupId] = normalizedEvents
-        }
-      }
+      if (!Array.isArray(raw)) return
+      this.entries = raw.map((value) => normalizeScoreHistoryEntry(value)).filter(Boolean) as ScoreHistoryEntry[]
+      this.prune()
     } catch (error: any) {
       if (error?.code !== 'ENOENT') {
-        this.logger.error(`加载 history.json 失败: ${error?.message || error}`)
+        this.logger.error(`加载 score-history.json 失败: ${error?.message || error}`)
       }
+      this.entries = []
     }
   }
 
   async save() {
-    const payload = Object.fromEntries(
-      Object.entries(this.history).map(([groupId, events]) => [
-        groupId,
-        events.map((event) => ({
-          groupId: event.groupId,
-          playerKey: event.playerKey,
-          playerName: event.playerName,
-          platform: event.platform,
-          oldScore: event.oldScore,
-          newScore: event.newScore,
-          delta: event.delta,
-          observedAt: event.observedAt,
-        })),
-      ]),
-    )
-    await writeJsonAtomic(this.filePath, payload)
+    this.prune()
+    await writeJsonAtomic(this.filePath, this.entries)
   }
 
-  getGroupEvents(groupId: string) {
-    return this.history[groupId] ? [...this.history[groupId]] : []
+  async append(entry: ScoreHistoryEntry) {
+    this.entries.push({ ...entry })
+    await this.save()
   }
 
-  appendEvent(groupId: string, event: ScoreChangeEvent) {
-    if (!this.history[groupId]) this.history[groupId] = []
-    this.history[groupId].push({ ...event })
+  listByGroup(groupId: string) {
+    return this.entries.filter((entry) => entry.groupId === groupId)
   }
 
-  pruneOlderThan(timestamp: number) {
-    for (const [groupId, events] of Object.entries(this.history)) {
-      const nextEvents = events.filter((event) => event.observedAt >= timestamp)
-      if (nextEvents.length) this.history[groupId] = nextEvents
-      else delete this.history[groupId]
-    }
+  private prune(now = Date.now()) {
+    const threshold = now - this.retentionDays * 24 * 60 * 60 * 1000
+    this.entries = this.entries.filter((entry) => entry.recordedAt >= threshold)
   }
 }
