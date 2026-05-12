@@ -321,7 +321,12 @@ export class ScoreHistoryStore {
 
   async append(entry: ScoreHistoryEntry) {
     this.entries.push({ ...entry })
-    await this.save()
+    try {
+      await this.save()
+    } catch (error) {
+      this.entries.pop()
+      throw error
+    }
   }
 
   listByGroup(groupId: string) {

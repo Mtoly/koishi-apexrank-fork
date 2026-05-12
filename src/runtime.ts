@@ -1391,9 +1391,11 @@ export class ApexRankWatchRuntime {
       }
       if (newScore === oldScore) return
 
-      group.players[playerKey] = {
+      const previousPlayerRecord: StoredPlayerRecord = { ...player }
+      const nextPlayerRecord: StoredPlayerRecord = {
         ...player,
         playerName: playerData.name,
+        platform: normalizePlatform(playerData.platform || player.platform || 'PC'),
         rankScore: newScore,
         rankName: playerData.rankName,
         rankDiv: playerData.rankDiv,
@@ -1404,34 +1406,59 @@ export class ApexRankWatchRuntime {
         ownerUserId: player.ownerUserId,
         remark: sanitizeRemark(player.remark),
       }
-      await this.groupStore.save()
+      const historyEntry = this.createScoreHistoryEntry(groupId, playerKey, nextPlayerRecord, oldScore, newScore)
+
+      group.players[playerKey] = nextPlayerRecord
+      try {
+        await this.groupStore.save()
+        this.logger.info(`group state updated for ${groupId}/${playerKey}: ${oldScore} -> ${newScore}`)
+      } catch (error) {
+        group.players[playerKey] = previousPlayerRecord
+        this.logger.error(`group state save failed for ${groupId}/${playerKey}: ${String((error as Error)?.message || error)}`)
+        return
+      }
+
+      try {
+        await this.scoreHistoryStore.append(historyEntry)
+        this.logger.info(`score history appended for ${groupId}/${playerKey}: ${historyEntry.delta >= 0 ? '+' : ''}${historyEntry.delta}`)
+      } catch (error) {
+        this.logger.error(`score history append failed for ${groupId}/${playerKey}: ${String((error as Error)?.message || error)}`)
+        group.players[playerKey] = previousPlayerRecord
+        try {
+          await this.groupStore.save()
+          this.logger.warn(`group state rolled back for ${groupId}/${playerKey} after history append failure`)
+        } catch (rollbackError) {
+          this.logger.error(`group state rollback failed for ${groupId}/${playerKey}: ${String((rollbackError as Error)?.message || rollbackError)}`)
+        }
+        return
+      }
 
       const diff = newScore - oldScore
       const diffText = diff > 0 ? `上升 ${diff}` : `下降 ${Math.abs(diff)}`
-      const displayName = this.getPlayerDisplayName(player)
+      const displayName = this.getPlayerDisplayName(nextPlayerRecord)
       const lines = [
         '📈 Apex 排位分数变化',
         this.timeLine(),
-        `\ud83d\udc64 \u73a9\u5bb6: ${displayName}`,
-        `\ud83d\udd79\ufe0f \u5e73\u53f0: ${formatPlatform(player.platform)}`,
-        `\ud83d\udd22 \u539f\u5206\u6570: ${oldScore}`,
-        `\ud83d\udd22 \u5f53\u524d\u5206\u6570: ${newScore}`,
-        `\ud83c\udfc6 \u6bb5\u4f4d: ${formatRank(playerData.rankName, playerData.rankDiv)}`,
-        `\ud83c\udfaf \u53d8\u52a8: ${diffText} \u5206`,
+        `👤 玩家: ${displayName}`,
+        `🕹️ 平台: ${formatPlatform(nextPlayerRecord.platform)}`,
+        `🔢 原分数: ${oldScore}`,
+        `🔢 当前分数: ${newScore}`,
+        `🏆 段位: ${formatRank(playerData.rankName, playerData.rankDiv)}`,
+        `🎯 变动: ${diffText} 分`,
       ]
-      if (seasonReset) lines.push('\u26a0\ufe0f \u68c0\u6d4b\u5230\u5927\u5e45\u5ea6\u5206\u6570\u4e0b\u964d\uff0c\u53ef\u80fd\u662f\u8d5b\u5b63\u91cd\u7f6e\u5bfc\u81f4\u3002')
-      if (playerData.globalRankPercent && playerData.globalRankPercent !== '\u672a\u77e5') {
-        lines.push(`\ud83c\udf10 \u5168\u7403\u6392\u540d: ${playerData.globalRankPercent}%`)
+      if (seasonReset) lines.push('⚠️ 检测到大幅度分数下降，可能是赛季重置导致。')
+      if (playerData.globalRankPercent && playerData.globalRankPercent !== '未知') {
+        lines.push(`🌐 全球排名: ${playerData.globalRankPercent}%`)
       }
-      if (playerData.selectedLegend) lines.push(`\ud83e\uddb8 \u5f53\u524d\u82f1\u96c4: ${playerData.selectedLegend}`)
-      if (playerData.legendKillsRank) lines.push(`\ud83c\udfaf \u51fb\u6740\u6392\u540d: \u5168\u7403 ${playerData.legendKillsRank.globalPercent}%`)
-      if (playerData.currentState) lines.push(`\ud83c\udfae \u5f53\u524d\u72b6\u6001: ${playerData.currentState}`)
+      if (playerData.selectedLegend) lines.push(`🦸 当前英雄: ${playerData.selectedLegend}`)
+      if (playerData.legendKillsRank) lines.push(`🎯 击杀排名: 全球 ${playerData.legendKillsRank.globalPercent}%`)
+      if (playerData.currentState) lines.push(`🎮 当前状态: ${playerData.currentState}`)
       const renderPlayer = {
         ...playerData,
         displayName,
       }
       try {
-        const imagePath = await this.imageRenderer.renderRankChange(renderPlayer, oldScore, newScore, player.platform, seasonReset)
+        const imagePath = await this.imageRenderer.renderRankChange(renderPlayer, oldScore, newScore, nextPlayerRecord.platform, seasonReset)
         await this.sendToTarget(group.target, h.image(imagePath))
       } catch (error) {
         this.logger.error(`rank change image render failed: ${String((error as Error)?.message || error)}`)
