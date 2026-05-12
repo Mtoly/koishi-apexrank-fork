@@ -4,6 +4,9 @@ import { Bot, Context, Logger, Session, h, type Fragment } from 'koishi'
 import { ApexApiClient, PlayerNotFoundError } from './api'
 import { ResolvedConfig } from './config'
 import { ApexImageRenderer } from './image'
+import { renderLeaderboardOutput } from './leaderboard/render'
+import { getLeaderboardResourceLayout } from './leaderboard/resource-reloader'
+import type { LeaderboardRenderRequest } from './leaderboard/types'
 import { BindingStore, GroupStore, ScoreHistoryStore, SettingsStore } from './storage'
 import {
   ApexPlayerStats,
@@ -532,6 +535,7 @@ export class ApexRankWatchRuntime {
       remarkSnapshot,
       displayNameSnapshot: this.getPlayerDisplayName(player),
       platform: normalizePlatform(player.platform || 'PC'),
+      ownerUserIdSnapshot: player.ownerUserId,
       oldScore,
       newScore,
       delta: newScore - oldScore,
@@ -590,25 +594,52 @@ export class ApexRankWatchRuntime {
     return lines.join('\n')
   }
 
-  private async renderLeaderboardResult(period: 'day' | 'week', direction: 'gain' | 'loss', start: number, endExclusive: number, entries: LeaderboardEntry[]) {
+  private buildLeaderboardRenderRequest(period: 'day' | 'week', direction: 'gain' | 'loss', start: number, endExclusive: number, entries: LeaderboardEntry[]): LeaderboardRenderRequest {
     const title = this.formatLeaderboardTitle(period, direction)
-    if (!entries.length) {
-      return this.formatLeaderboardText(title, start, endExclusive, entries, direction)
+    return {
+      title,
+      periodLabel: period === 'day' ? '日' : '周',
+      directionLabel: direction === 'gain' ? '上分' : '掉分',
+      periodRangeText: this.formatLeaderboardPeriodText(start, endExclusive),
+      entries,
+      renderMode: this.config.leaderboardRenderMode,
+      enableLegacyImageFallback: this.config.leaderboardEnableLegacyImageFallback,
+      enableTextFallback: this.config.leaderboardEnableTextFallback,
     }
-    const periodLabel = period === 'day' ? '日' : '周'
-    const directionLabel = direction === 'gain' ? '上分' : '掉分'
-    const periodRangeText = this.formatLeaderboardPeriodText(start, endExclusive)
-    try {
-      const imagePath = await this.imageRenderer.renderLeaderboard(entries, {
-        periodLabel,
-        directionLabel,
-        periodRangeText,
-      })
-      return h.image(imagePath)
-    } catch (error) {
-      this.logger.error(`leaderboard image render failed: ${String((error as Error)?.message || error)}`)
-      return this.formatLeaderboardText(title, start, endExclusive, entries, direction)
-    }
+  }
+
+  private async renderLeaderboardResult(period: 'day' | 'week', direction: 'gain' | 'loss', start: number, endExclusive: number, entries: LeaderboardEntry[]) {
+    const request = this.buildLeaderboardRenderRequest(period, direction, start, endExclusive, entries)
+    return renderLeaderboardOutput(request, {
+      imageRenderer: this.imageRenderer,
+      logger: this.logger,
+      runtimeConfig: {
+        renderMode: this.config.leaderboardRenderMode,
+        enableLegacyImageFallback: this.config.leaderboardEnableLegacyImageFallback,
+        enableTextFallback: this.config.leaderboardEnableTextFallback,
+        resourceDir: this.config.leaderboardResourceDir,
+        avatarCacheTTL: this.config.leaderboardAvatarCacheTTL,
+        avatarFailureCacheTTL: this.config.leaderboardAvatarFailureCacheTTL,
+        avatarFetchTimeout: this.config.leaderboardAvatarFetchTimeout,
+        viewportWidth: this.config.leaderboardViewportWidth,
+        deviceScaleFactor: this.config.leaderboardDeviceScaleFactor,
+        waitUntil: this.config.leaderboardWaitUntil,
+        maxRowsPerImage: this.config.leaderboardMaxRowsPerImage,
+        titleFont: this.config.leaderboardTitleFont,
+        bodyFont: this.config.leaderboardBodyFont,
+        numberFont: this.config.leaderboardNumberFont,
+        fontFallbackEnabled: this.config.leaderboardFontFallbackEnabled,
+        themePreset: this.config.leaderboardThemePreset,
+        backgroundType: this.config.leaderboardBackgroundType,
+        backgroundValue: this.config.leaderboardBackgroundValue,
+        backgroundApiKey: this.config.leaderboardBackgroundApiKey,
+        customCss: this.config.leaderboardCustomCss,
+      },
+      resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
+      puppeteer: {
+        browser: (this.ctx.puppeteer as any)?.browser,
+      },
+    })
   }
 
   private async queryPlayerByInput(input: string) {
@@ -814,6 +845,8 @@ export class ApexRankWatchRuntime {
       '/apexranklist  别名：/apex列表（有备注时优先显示备注名）',
       '/apexremark <玩家|uid:...> [平台] [备注]  别名：/apex备注',
       '/apex日上分榜 /apex日掉分榜 /apex周上分榜 /apex周掉分榜',
+      'HTML 榜单支持独立资源目录、内置字体回退、背景预设 / 本地文件 / URL / API / 自定义 CSS。',
+      'HTML 榜单头像默认使用“添加该监控项的 QQ 用户头像”，并带有成功 / 失败缓存回退。',
       '/apexrankremove <玩家|uid:...> [平台]  别名：/apex移除 /取消持续视奸',
       '【信息】',
       '/map  别名：/地图 /排位地图 /apexmap /apexrankmap',
@@ -840,136 +873,6 @@ export class ApexRankWatchRuntime {
       lines.push(`⛔ 查询封禁玩家：已配置 ${this.queryBlocklist.size} 个。`)
     }
     return lines.join('\n')
-  }
-
-  private async handleRankQuery(session: CommandSession, input: string) {
-    const deny = this.guardAccess(session)
-    if (deny) return [this.timeLine(), deny].join('\n')
-    if (!this.config.apiKey) return this.missingApiKeyText()
-
-    try {
-      const result = await this.queryPlayerByInput(input)
-      if ('error' in result) return [this.timeLine(), result.error].join('\n')
-      return this.renderRankQueryResult(result.player, result.usedPlatform)
-    } catch (error) {
-      if (error instanceof PlayerNotFoundError) {
-        return [this.timeLine(), '⚠️ 未找到该玩家，请检查名称是否正确，或在命令末尾指定平台。'].join('\n')
-      }
-      this.logger.error(`rank query failed: ${String((error as Error)?.message || error)}`)
-      return this.apiRequestFailedText('查询')
-    }
-  }
-
-  private async handleBoundRankQuery(session: CommandSession, input: string) {
-    const deny = this.guardAccess(session)
-    if (deny) return [this.timeLine(), deny].join('\n')
-    if (!this.config.apiKey) return this.missingApiKeyText()
-
-    const rawInput = String(input || '').trim()
-    if (rawInput) return this.handleRankQuery(session, rawInput)
-
-    const binding = this.getBoundRecord(session)
-    if (!binding) {
-      return [
-        this.timeLine(),
-        '⚠️ 你还没有绑定 Apex 账号。',
-        '可使用：/apex绑定 <玩家名|uid:...> [平台]',
-      ].join('\n')
-    }
-    if (this.isBlacklisted(binding.lookupId) || this.isQueryBlocked(binding.lookupId)) {
-      return [this.timeLine(), `⛔ 绑定账号（${binding.playerName || binding.lookupId}）已被管理员加入黑名单，禁止查询。`].join('\n')
-    }
-
-    try {
-      const { player, platform: usedPlatform } = await this.api.fetchPlayerStatsAuto(binding.lookupId, binding.platform, binding.useUid)
-      return this.renderRankQueryResult(player, usedPlatform)
-    } catch (error) {
-      if (error instanceof PlayerNotFoundError) {
-        return [
-          this.timeLine(),
-          '⚠️ 当前绑定账号已无法查询，请重新绑定。',
-          '可使用：/apex绑定 <玩家名|uid:...> [平台]',
-        ].join('\n')
-      }
-      this.logger.error(`bound rank query failed: ${String((error as Error)?.message || error)}`)
-      return this.apiRequestFailedText('查询')
-    }
-  }
-
-  private async handleBind(session: CommandSession, input: string) {
-    const deny = this.guardAccess(session)
-    if (deny) return [this.timeLine(), deny].join('\n')
-    if (!this.config.apiKey) return this.missingApiKeyText()
-
-    const userId = this.getBindingUserId(session)
-    if (!userId) return [this.timeLine(), '⚠️ 当前会话无法识别用户，暂时不能绑定 Apex 账号。'].join('\n')
-
-    try {
-      const result = await this.queryPlayerByInput(input)
-      if ('error' in result) return [this.timeLine(), result.error].join('\n')
-      const { player, usedPlatform, identifier, useUid } = result
-      if (player.rankScore < this.config.minValidScore) {
-        return [this.timeLine(), `⚠️ 查询到 ${player.name} 的分数为 ${player.rankScore}，低于最低有效分数 ${this.config.minValidScore}，可能是 API 异常，请稍后再试。`].join('\n')
-      }
-
-      const record: UserBindingRecord = {
-        userId,
-        lookupId: identifier,
-        useUid,
-        platform: normalizePlatform(usedPlatform),
-        playerName: player.name,
-        uid: player.uid || '',
-        updatedAt: Date.now(),
-      }
-      this.bindingStore.set(record)
-      await this.bindingStore.save()
-
-      return [
-        this.timeLine(),
-        '✅ 已绑定 Apex 账号。',
-        ...this.formatBoundPlayer(record),
-        '💡 之后可直接使用：/apex查分',
-      ].join('\n')
-    } catch (error) {
-      if (error instanceof PlayerNotFoundError) {
-        return [this.timeLine(), '⚠️ 未找到该玩家，请检查名称是否正确，或在命令末尾指定平台。'].join('\n')
-      }
-      this.logger.error(`bind account failed: ${String((error as Error)?.message || error)}`)
-      return this.apiRequestFailedText('绑定账号')
-    }
-  }
-
-  private async handleUnbind(session: CommandSession) {
-    const deny = this.guardAccess(session)
-    if (deny) return [this.timeLine(), deny].join('\n')
-
-    const userId = this.getBindingUserId(session)
-    if (!userId) return [this.timeLine(), '⚠️ 当前会话无法识别用户，暂时不能解绑 Apex 账号。'].join('\n')
-    if (!this.bindingStore.remove(userId)) {
-      return [this.timeLine(), 'ℹ️ 你当前还没有绑定 Apex 账号。'].join('\n')
-    }
-    await this.bindingStore.save()
-    return [this.timeLine(), '✅ 已解绑当前 Apex 账号。'].join('\n')
-  }
-
-  private async handleBindingInfo(session: CommandSession) {
-    const deny = this.guardAccess(session)
-    if (deny) return [this.timeLine(), deny].join('\n')
-
-    const binding = this.getBoundRecord(session)
-    if (!binding) {
-      return [
-        this.timeLine(),
-        'ℹ️ 你当前还没有绑定 Apex 账号。',
-        '可使用：/apex绑定 <玩家名|uid:...> [平台]',
-      ].join('\n')
-    }
-
-    return [
-      this.timeLine(),
-      '📌 当前绑定的 Apex 账号信息',
-      ...this.formatBoundPlayer(binding),
-    ].join('\n')
   }
 
   private async handleLeaderboard(session: CommandSession, period: 'day' | 'week', direction: 'gain' | 'loss') {
@@ -1195,6 +1098,7 @@ export class ApexRankWatchRuntime {
         globalRankPercent: player.globalRankPercent,
         selectedLegend: player.selectedLegend,
         legendKillsPercent: player.legendKillsRank?.globalPercent || '',
+        ownerUserId: this.getUserId(session) || undefined,
       }, target)
       await this.groupStore.save()
 
@@ -1497,6 +1401,7 @@ export class ApexRankWatchRuntime {
         globalRankPercent: playerData.globalRankPercent,
         selectedLegend: playerData.selectedLegend,
         legendKillsPercent: playerData.legendKillsRank?.globalPercent || '',
+        ownerUserId: player.ownerUserId,
         remark: sanitizeRemark(player.remark),
       }
       await this.groupStore.save()
@@ -1541,11 +1446,11 @@ export class ApexRankWatchRuntime {
     }
   }
 
-  private formatPlayerRankText(playerData: ApexPlayerStats) {
+  private formatPlayerRankText(playerData: ApexPlayerStats & { displayName?: string }) {
     const lines = [
       '\ud83d\udcca Apex \u6bb5\u4f4d\u4fe1\u606f',
       this.timeLine(),
-      `\ud83d\udc64 \u73a9\u5bb6: ${playerData.name}`,
+      `\ud83d\udc64 \u73a9\u5bb6: ${playerData.displayName || playerData.name}`,
       `\ud83d\udd79\ufe0f \u5e73\u53f0: ${formatPlatform(playerData.platform)}`,
       `\ud83c\udd94 UID: ${playerData.uid || '\u672a\u77e5'}`,
       `\ud83c\udfc6 \u6bb5\u4f4d: ${formatRank(playerData.rankName, playerData.rankDiv)}`,
@@ -1630,14 +1535,6 @@ export class ApexRankWatchRuntime {
     const end = new Date(endIso).getTime()
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return ''
     const progress = Math.min(100, Math.max(0, ((Date.now() - start) / (end - start)) * 100))
-    return `${progress.toFixed(2)}%`
-  }
-}
-   const progress = Math.min(100, Math.max(0, ((Date.now() - start) / (end - start)) * 100))
-    return `${progress.toFixed(2)}%`
-  }
-}
-) - start) / (end - start)) * 100))
     return `${progress.toFixed(2)}%`
   }
 }

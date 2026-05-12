@@ -624,7 +624,7 @@ export class ApexImageRenderer {
       this.drawOuterFrame(ctx, CARD_WIDTH, CARD_HEIGHT)
       this.drawRankChangeHeader(ctx)
       this.drawTimeBar(ctx)
-      await this.drawRankInfoPanel(ctx, [54, 360, 388, 670], 'player', '玩家', player.name || '未知')
+      await this.drawRankInfoPanel(ctx, [54, 360, 388, 670], 'player', '玩家', playerDisplayName(player))
       await this.drawRankInfoPanel(ctx, [402, 360, 720, 670], 'platform', '平台', formatPlatform(platform || player.platform))
       await this.drawRankBadgePanel(ctx, [734, 360, 1070, 670], '段位', rankDisplay(player), player.rankName, player.rankDiv)
       this.drawScoreChangePanel(ctx, oldScore, newScore, isSeasonReset)

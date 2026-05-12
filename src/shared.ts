@@ -89,6 +89,7 @@ export interface StoredPlayerRecord {
   globalRankPercent: string
   selectedLegend: string
   legendKillsPercent: string
+  ownerUserId?: string
   remark?: string
 }
 
@@ -120,6 +121,7 @@ export interface ScoreHistoryEntry {
   remarkSnapshot?: string
   displayNameSnapshot: string
   platform: string
+  ownerUserIdSnapshot?: string
   oldScore: number
   newScore: number
   delta: number
@@ -132,6 +134,7 @@ export interface LeaderboardEntry {
   remarkSnapshot?: string
   displayName: string
   platform: string
+  ownerUserId?: string
   netDelta: number
   latestScore: number
   latestRecordedAt: number
@@ -399,6 +402,7 @@ export function summarizeLeaderboard(entries: ScoreHistoryEntry[]) {
         remarkSnapshot: entry.remarkSnapshot,
         displayName: entry.displayNameSnapshot || formatPlayerDisplayName(entry.playerName, entry.remarkSnapshot),
         platform: entry.platform,
+        ownerUserId: entry.ownerUserIdSnapshot,
         netDelta: entry.delta,
         latestScore: entry.newScore,
         latestRecordedAt: entry.recordedAt,
@@ -412,6 +416,7 @@ export function summarizeLeaderboard(entries: ScoreHistoryEntry[]) {
       existing.remarkSnapshot = entry.remarkSnapshot
       existing.displayName = entry.displayNameSnapshot || formatPlayerDisplayName(entry.playerName, entry.remarkSnapshot)
       existing.platform = entry.platform
+      existing.ownerUserId = entry.ownerUserIdSnapshot
       existing.latestScore = entry.newScore
       existing.latestRecordedAt = entry.recordedAt
     }
@@ -471,6 +476,12 @@ export function formatPlatform(platform: string) {
     X1: 'Xbox',
     SWITCH: 'Switch',
   }[normalized] || normalized
+}
+
+export function buildQqAvatarUrl(userId: string, size = 640) {
+  const normalized = String(userId || '').trim()
+  if (!normalized) return ''
+  return `https://q1.qlogo.cn/g?b=qq&nk=${normalized}&s=${size}`
 }
 
 export function formatRank(rankName: string, rankDiv: number) {

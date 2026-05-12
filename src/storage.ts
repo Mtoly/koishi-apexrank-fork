@@ -66,6 +66,7 @@ function normalizePlayerRecord(value: any): StoredPlayerRecord | null {
     globalRankPercent: String(value.globalRankPercent ?? value.global_rank_percent ?? '未知').trim() || '未知',
     selectedLegend: String(value.selectedLegend ?? value.selected_legend ?? '').trim(),
     legendKillsPercent,
+    ownerUserId: String(value.ownerUserId ?? value.owner_user_id ?? '').trim() || undefined,
     remark: sanitizeRemark(value.remark),
   }
 }
@@ -128,6 +129,7 @@ function normalizeScoreHistoryEntry(value: any): ScoreHistoryEntry | null {
     remarkSnapshot: sanitizeRemark(value.remarkSnapshot ?? value.remark_snapshot) || undefined,
     displayNameSnapshot: String(value.displayNameSnapshot ?? value.display_name_snapshot ?? playerName).trim() || playerName,
     platform,
+    ownerUserIdSnapshot: String(value.ownerUserIdSnapshot ?? value.owner_user_id_snapshot ?? '').trim() || undefined,
     oldScore,
     newScore,
     delta,
