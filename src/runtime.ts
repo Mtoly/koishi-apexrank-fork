@@ -637,7 +637,7 @@ export class ApexRankWatchRuntime {
       },
       resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
       puppeteer: {
-        browser: (this.ctx.puppeteer as any)?.browser,
+        browser: (this.ctx as any)?.puppeteer?.browser,
       },
     })
   }
