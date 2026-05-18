@@ -23,6 +23,9 @@ export interface LeaderboardHtmlRow {
   latestScoreLabel: string
   deltaLabel: string
   deltaDirection: 'gain' | 'loss'
+  deltaAbs: number
+  barPercent: number
+  barWidthCss: string
   avatarBase64?: string
 }
 

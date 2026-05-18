@@ -18,12 +18,18 @@ function renderAvatar(row: LeaderboardHtmlRow) {
 
 function renderRow(row: LeaderboardHtmlRow) {
   return `<div class="leaderboard-row ${row.deltaDirection}">
-    <div class="rank">#${row.rank}</div>
-    <div class="avatar">${renderAvatar(row)}</div>
-    <div class="name" title="${escapeHtml(row.displayName)}">${escapeHtml(row.displayNameTruncated)}</div>
-    <div class="platform">${escapeHtml(row.platformLabel)}</div>
-    <div class="score">${escapeHtml(row.latestScoreLabel)}</div>
-    <div class="delta">${escapeHtml(row.deltaLabel)}</div>
+    <div class="row-main">
+      <div class="rank">#${row.rank}</div>
+      <div class="avatar">${renderAvatar(row)}</div>
+      <div class="identity">
+        <div class="name" title="${escapeHtml(row.displayName)}">${escapeHtml(row.displayNameTruncated)}</div>
+        <div class="meta">${escapeHtml(row.platformLabel)} ｜ 当前分 ${escapeHtml(row.latestScoreLabel)}</div>
+      </div>
+      <div class="delta">${escapeHtml(row.deltaLabel)}</div>
+    </div>
+    <div class="bar-track">
+      <div class="bar-fill ${row.deltaDirection}" style="width: ${escapeHtml(row.barWidthCss)}"></div>
+    </div>
   </div>`
 }
 
@@ -131,16 +137,17 @@ body {
   padding: 10px 22px 22px 22px;
 }
 .leaderboard-row {
-  display: grid;
-  grid-template-columns: 72px 64px minmax(260px, 1fr) 120px 120px 140px;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 6px;
+  padding: 14px 10px 16px 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 .leaderboard-row:last-child { border-bottom: none; }
+.row-main {
+  display: grid;
+  grid-template-columns: 72px 56px minmax(260px, 1fr) 140px;
+  align-items: center;
+  gap: 12px;
+}
 .rank,
-.score,
 .delta {
   font-family: '${numberFont}', '${bodyFont}', 'Noto Sans CJK SC', sans-serif;
 }
@@ -167,6 +174,9 @@ body {
   color: var(--text-primary);
   font-size: 20px;
 }
+.identity {
+  min-width: 0;
+}
 .name {
   font-size: 22px;
   font-weight: 600;
@@ -174,16 +184,31 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.platform,
-.score {
+.meta {
+  margin-top: 6px;
   color: var(--text-secondary);
-  font-size: 16px;
+  font-size: 14px;
 }
 .delta {
   justify-self: end;
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 700;
 }
+.bar-track {
+  margin-top: 12px;
+  width: 100%;
+  height: 16px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.10);
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+.bar-fill.gain { background: var(--gain); }
+.bar-fill.loss { background: var(--loss); }
 .leaderboard-row.gain .delta { color: var(--gain); }
 .leaderboard-row.loss .delta { color: var(--loss); }
 .footer {

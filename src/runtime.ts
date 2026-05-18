@@ -1,9 +1,13 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { Bot, Context, Logger, Session, h, type Fragment } from 'koishi'
 import { ApexApiClient, PlayerNotFoundError } from './api'
 import { ResolvedConfig } from './config'
 import { ApexImageRenderer } from './image'
+import { buildHelpCardDocument } from './html-cards/help'
+import { buildPredatorCardDocument } from './html-cards/predator'
+import { buildSeasonCardDocument } from './html-cards/season'
+import { renderHtmlCardToBuffer } from './html-cards/shared-renderer'
 import { renderLeaderboardOutput } from './leaderboard/render'
 import { getLeaderboardResourceLayout } from './leaderboard/resource-reloader'
 import type { LeaderboardRenderRequest } from './leaderboard/types'
@@ -15,6 +19,7 @@ import {
   NotificationTarget,
   RuntimeSettings,
   ScoreHistoryEntry,
+  SeasonInfo,
   SEASON_KEYWORD_COMMAND_BLOCKLIST,
   StoredGroupRecord,
   StoredPlayerRecord,
@@ -93,6 +98,92 @@ export class ApexRankWatchRuntime {
     this.registerCommands()
     this.registerSeasonKeywordMiddleware()
     this.ready = this.waitForKoishiReady()
+  }
+
+  private async imagePathToMessage(imagePath: string, mime = 'image/png') {
+    const imageBuffer = await readFile(imagePath)
+    return h.image(imageBuffer, mime)
+  }
+
+  private async imagePathToMessageWithSuffix(imagePath: string, suffix = '', mime = 'image/png'): Promise<Fragment> {
+    const message = await this.imagePathToMessage(imagePath, mime)
+    return suffix ? `${message}${suffix}` : message
+  }
+
+  private async tryRenderImageMessage(
+    render: () => Promise<string>,
+    errorLabel: string,
+    suffix = '',
+  ): Promise<Fragment | null> {
+    try {
+      const imagePath = await render()
+      return suffix
+        ? await this.imagePathToMessageWithSuffix(imagePath, suffix)
+        : await this.imagePathToMessage(imagePath)
+    } catch (error) {
+      this.logger.error(`${errorLabel}: ${String((error as Error)?.message || error)}`)
+      return null
+    }
+  }
+
+  private async tryRenderHtmlCardMessage(
+    render: () => Promise<Buffer>,
+    errorLabel: string,
+    suffix = '',
+  ): Promise<Fragment | null> {
+    try {
+      const imageBuffer = await render()
+      const message = h.image(imageBuffer, 'image/png')
+      return suffix ? `${message}${suffix}` : message
+    } catch (error) {
+      this.logger.error(`${errorLabel}: ${String((error as Error)?.message || error)}`)
+      return null
+    }
+  }
+
+  // Season entry matrix frozen for this migration:
+  // 1. /apexseason [season:string]
+  // 2. season keyword auto-reply middleware
+  private async renderSeasonResult(seasonInfo: SeasonInfo, suffix = '', errorLabelPrefix = 'season'): Promise<Fragment | string> {
+    const htmlMessage = await this.tryRenderHtmlCardMessage(
+      () => renderHtmlCardToBuffer({
+        document: buildSeasonCardDocument(seasonInfo),
+        context: {
+          logger: this.logger,
+          runtimeConfig: {
+            resourceDir: this.config.leaderboardResourceDir,
+            viewportWidth: this.config.leaderboardViewportWidth,
+            deviceScaleFactor: this.config.leaderboardDeviceScaleFactor,
+            waitUntil: this.config.leaderboardWaitUntil,
+            titleFont: this.config.leaderboardTitleFont,
+            bodyFont: this.config.leaderboardBodyFont,
+            numberFont: this.config.leaderboardNumberFont,
+            fontFallbackEnabled: this.config.leaderboardFontFallbackEnabled,
+            themePreset: this.config.leaderboardThemePreset,
+            backgroundType: this.config.leaderboardBackgroundType,
+            backgroundValue: this.config.leaderboardBackgroundValue,
+            backgroundApiKey: this.config.leaderboardBackgroundApiKey,
+            customCss: this.config.leaderboardCustomCss,
+          },
+          resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
+          puppeteer: {
+            browser: (this.ctx as any).puppeteer?.browser,
+          },
+        },
+      }),
+      `${errorLabelPrefix} html render failed`,
+      suffix,
+    )
+    if (htmlMessage) return htmlMessage
+
+    const imageMessage = await this.tryRenderImageMessage(
+      () => this.imageRenderer.renderSeasonInfo(seasonInfo),
+      `${errorLabelPrefix} image render failed`,
+      suffix,
+    )
+    if (imageMessage) return imageMessage
+
+    return `${this.formatSeasonInfo(seasonInfo)}${suffix}`
   }
 
   private waitForKoishiReady() {
@@ -246,12 +337,7 @@ export class ApexRankWatchRuntime {
       try {
         const seasonInfo = await this.api.fetchSeasonInfo()
         const suffix = groupId ? '\n\ud83d\udd15 \u5173\u95ed\u8d5b\u5b63\u5173\u952e\u8bcd\u56de\u590d\uff1a/\u8d5b\u5b63\u5173\u95ed' : ''
-        try {
-          const imagePath = await this.imageRenderer.renderSeasonInfo(seasonInfo)
-          return `${h.image(imagePath)}${suffix}`
-        } catch {
-          return `${this.formatSeasonInfo(seasonInfo)}${suffix}`
-        }
+        return this.renderSeasonResult(seasonInfo, suffix, 'season keyword')
       } catch (error: any) {
         this.logger.error(`season query failed: ${error?.message || error}`)
       }
@@ -526,6 +612,41 @@ export class ApexRankWatchRuntime {
     return formatPlayerDisplayName(record.playerName, remark)
   }
 
+  private parsePlayerKey(playerKey: string) {
+    const raw = String(playerKey || '').trim()
+    const atIndex = raw.lastIndexOf('@')
+    if (atIndex <= 0) return null
+    const identifierPart = raw.slice(0, atIndex)
+    const platform = normalizePlatform(raw.slice(atIndex + 1) || 'PC')
+    if (identifierPart.startsWith('uid:')) {
+      return {
+        lookupId: identifierPart.slice(4),
+        useUid: true,
+        platform,
+      }
+    }
+    if (identifierPart.startsWith('name:')) {
+      return {
+        lookupId: identifierPart.slice(5),
+        useUid: false,
+        platform,
+      }
+    }
+    return null
+  }
+
+  private resolveLeaderboardOwnerUserId(groupId: string, playerKey: string, fallbackOwnerUserId = '') {
+    const direct = String(fallbackOwnerUserId || '').trim()
+    if (direct) return direct
+
+    const currentOwnerUserId = String(this.groupStore.getGroup(groupId)?.players?.[playerKey]?.ownerUserId || '').trim()
+    if (currentOwnerUserId) return currentOwnerUserId
+
+    const parsed = this.parsePlayerKey(playerKey)
+    if (!parsed) return ''
+    return this.bindingStore.findUserIdByLookup(parsed.lookupId, parsed.platform, parsed.useUid)
+  }
+
   private createScoreHistoryEntry(groupId: string, playerKey: string, player: StoredPlayerRecord, oldScore: number, newScore: number): ScoreHistoryEntry {
     const remarkSnapshot = sanitizeRemark(player.remark) || undefined
     return {
@@ -548,6 +669,10 @@ export class ApexRankWatchRuntime {
     const entries = this.scoreHistoryStore.listByGroup(groupId)
       .filter((entry) => isTimestampInRange(entry.recordedAt, start, endExclusive))
     const summarized = summarizeLeaderboard(entries)
+      .map((entry) => ({
+        ...entry,
+        ownerUserId: this.resolveLeaderboardOwnerUserId(groupId, entry.playerKey, entry.ownerUserId),
+      }))
       .filter((entry) => direction === 'gain' ? entry.netDelta > 0 : entry.netDelta < 0)
       .sort((left, right) => direction === 'gain' ? right.netDelta - left.netDelta : left.netDelta - right.netDelta)
     return {
@@ -559,7 +684,7 @@ export class ApexRankWatchRuntime {
 
   private formatLeaderboardTitle(period: 'day' | 'week', direction: 'gain' | 'loss') {
     const periodLabel = period === 'day' ? '日' : '周'
-    return direction === 'gain' ? `📈 Apex ${periodLabel}上分榜` : `📉 Apex ${periodLabel}掉分榜`
+    return direction === 'gain' ? `Apex ${periodLabel}上分榜` : `Apex ${periodLabel}掉分榜`
   }
 
   private formatLeaderboardPeriodText(start: number, endExclusive: number) {
@@ -637,7 +762,7 @@ export class ApexRankWatchRuntime {
       },
       resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
       puppeteer: {
-        browser: (this.ctx as any)?.puppeteer?.browser,
+        browser: (this.ctx as any).puppeteer?.browser,
       },
     })
   }
@@ -665,13 +790,12 @@ export class ApexRankWatchRuntime {
       ...player,
       displayName: displayName || player.name,
     }
-    try {
-      const imagePath = await this.imageRenderer.renderPlayerRank(renderPlayer)
-      return h.image(imagePath)
-    } catch (error) {
-      this.logger.error(`player rank image render failed: ${String((error as Error)?.message || error)}`)
-      return this.formatPlayerRankText(renderPlayer)
-    }
+    const imageMessage = await this.tryRenderImageMessage(
+      () => this.imageRenderer.renderPlayerRank(renderPlayer),
+      'player rank image render failed',
+    )
+    if (imageMessage) return imageMessage
+    return this.formatPlayerRankText(renderPlayer)
   }
 
   private async handleRankQuery(session: CommandSession, input: string) {
@@ -825,12 +949,41 @@ export class ApexRankWatchRuntime {
     const deny = this.guardAccess(session)
     if (deny) return [this.timeLine(), deny].join('\n')
 
-    try {
-      const imagePath = await this.imageRenderer.renderHelp(this.imageRenderOptions())
-      return h.image(imagePath)
-    } catch (error) {
-      this.logger.error(`help image render failed: ${String((error as Error)?.message || error)}`)
-    }
+    const htmlMessage = await this.tryRenderHtmlCardMessage(
+      () => renderHtmlCardToBuffer({
+        document: buildHelpCardDocument(this.imageRenderOptions()),
+        context: {
+          logger: this.logger,
+          runtimeConfig: {
+            resourceDir: this.config.leaderboardResourceDir,
+            viewportWidth: this.config.leaderboardViewportWidth,
+            deviceScaleFactor: this.config.leaderboardDeviceScaleFactor,
+            waitUntil: this.config.leaderboardWaitUntil,
+            titleFont: this.config.leaderboardTitleFont,
+            bodyFont: this.config.leaderboardBodyFont,
+            numberFont: this.config.leaderboardNumberFont,
+            fontFallbackEnabled: this.config.leaderboardFontFallbackEnabled,
+            themePreset: this.config.leaderboardThemePreset,
+            backgroundType: this.config.leaderboardBackgroundType,
+            backgroundValue: this.config.leaderboardBackgroundValue,
+            backgroundApiKey: this.config.leaderboardBackgroundApiKey,
+            customCss: this.config.leaderboardCustomCss,
+          },
+          resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
+          puppeteer: {
+            browser: (this.ctx as any).puppeteer?.browser,
+          },
+        },
+      }),
+      'help html render failed',
+    )
+    if (htmlMessage) return htmlMessage
+
+    const imageMessage = await this.tryRenderImageMessage(
+      () => this.imageRenderer.renderHelp(this.imageRenderOptions()),
+      'help image render failed',
+    )
+    if (imageMessage) return imageMessage
 
     const lines = [
       this.timeLine(),
@@ -895,13 +1048,12 @@ export class ApexRankWatchRuntime {
 
     try {
       const rotationInfo = await this.api.fetchMapRotationInfo()
-      try {
-        const imagePath = await this.imageRenderer.renderMapRotation(rotationInfo, mode)
-        return h.image(imagePath)
-      } catch (error) {
-        this.logger.error(`map rotation image render failed: ${String((error as Error)?.message || error)}`)
-        return this.formatMapRotationText(rotationInfo, mode)
-      }
+      const imageMessage = await this.tryRenderImageMessage(
+        () => this.imageRenderer.renderMapRotation(rotationInfo, mode),
+        'map rotation image render failed',
+      )
+      if (imageMessage) return imageMessage
+      return this.formatMapRotationText(rotationInfo, mode)
     } catch (error) {
       this.logger.error(`map rotation query failed: ${String((error as Error)?.message || error)}`)
       return this.apiRequestFailedText(mode === 'battle_royale' ? '\u5339\u914d\u5730\u56fe\u67e5\u8be2' : '\u5730\u56fe\u8f6e\u6362\u67e5\u8be2')
@@ -927,13 +1079,43 @@ export class ApexRankWatchRuntime {
       if (!predatorInfo.platforms.length) {
         return [this.timeLine(), '\u26a0\ufe0f \u6682\u672a\u83b7\u53d6\u5230\u730e\u6740\u95e8\u69db\u6570\u636e\u3002'].join('\n')
       }
-      try {
-        const imagePath = await this.imageRenderer.renderPredatorInfo(predatorInfo)
-        return h.image(imagePath)
-      } catch (error) {
-        this.logger.error(`predator image render failed: ${String((error as Error)?.message || error)}`)
-        return this.formatPredatorInfoText(predatorInfo, selectedPlatform)
-      }
+
+      const htmlMessage = await this.tryRenderHtmlCardMessage(
+        () => renderHtmlCardToBuffer({
+          document: buildPredatorCardDocument(predatorInfo, selectedPlatform),
+          context: {
+            logger: this.logger,
+            runtimeConfig: {
+              resourceDir: this.config.leaderboardResourceDir,
+              viewportWidth: this.config.leaderboardViewportWidth,
+              deviceScaleFactor: this.config.leaderboardDeviceScaleFactor,
+              waitUntil: this.config.leaderboardWaitUntil,
+              titleFont: this.config.leaderboardTitleFont,
+              bodyFont: this.config.leaderboardBodyFont,
+              numberFont: this.config.leaderboardNumberFont,
+              fontFallbackEnabled: this.config.leaderboardFontFallbackEnabled,
+              themePreset: this.config.leaderboardThemePreset,
+              backgroundType: this.config.leaderboardBackgroundType,
+              backgroundValue: this.config.leaderboardBackgroundValue,
+              backgroundApiKey: this.config.leaderboardBackgroundApiKey,
+              customCss: this.config.leaderboardCustomCss,
+            },
+            resourceLayout: getLeaderboardResourceLayout(this.config.leaderboardResourceDir),
+            puppeteer: {
+              browser: (this.ctx as any).puppeteer?.browser,
+            },
+          },
+        }),
+        'predator html render failed',
+      )
+      if (htmlMessage) return htmlMessage
+
+      const imageMessage = await this.tryRenderImageMessage(
+        () => this.imageRenderer.renderPredatorInfo(predatorInfo),
+        'predator image render failed',
+      )
+      if (imageMessage) return imageMessage
+      return this.formatPredatorInfoText(predatorInfo, selectedPlatform)
     } catch (error) {
       this.logger.error(`predator query failed: ${String((error as Error)?.message || error)}`)
       return this.apiRequestFailedText('\u67e5\u8be2')
@@ -954,13 +1136,7 @@ export class ApexRankWatchRuntime {
 
     try {
       const seasonInfo = await this.api.fetchSeasonInfo(seasonNumber)
-      try {
-        const imagePath = await this.imageRenderer.renderSeasonInfo(seasonInfo)
-        return h.image(imagePath)
-      } catch (error) {
-        this.logger.error(`season image render failed: ${String((error as Error)?.message || error)}`)
-        return this.formatSeasonInfo(seasonInfo)
-      }
+      return this.renderSeasonResult(seasonInfo)
     } catch (error) {
       this.logger.error(`season query failed: ${String((error as Error)?.message || error)}`)
       return [this.timeLine(), '\u274c \u67e5\u8be2\u5931\u8d25\uff1a\u65e0\u6cd5\u83b7\u53d6\u8d5b\u5b63\u65f6\u95f4\u4fe1\u606f\u3002'].join('\n')
@@ -1103,12 +1279,11 @@ export class ApexRankWatchRuntime {
       await this.groupStore.save()
 
       await this.sendToTarget(target, `\u2705 \u6d4b\u8bd5\u6d88\u606f\uff1a\u5df2\u6dfb\u52a0\u5bf9 ${player.name} \u7684\u6392\u540d\u76d1\u63a7\u3002`)
-      try {
-        const imagePath = await this.imageRenderer.renderMonitorAdded({ ...player, displayName: player.name }, normalizedPlatform, this.imageRenderOptions())
-        return h.image(imagePath)
-      } catch (error) {
-        this.logger.error(`monitor added image render failed: ${String((error as Error)?.message || error)}`)
-      }
+      const imageMessage = await this.tryRenderImageMessage(
+        () => this.imageRenderer.renderMonitorAdded({ ...player, displayName: player.name }, normalizedPlatform, this.imageRenderOptions()),
+        'monitor added image render failed',
+      )
+      if (imageMessage) return imageMessage
       return [
         this.timeLine(),
         `\u2705 \u6210\u529f\u6dfb\u52a0\u5bf9 ${player.name} \u7684\u6392\u540d\u76d1\u63a7\u3002`,
@@ -1140,12 +1315,11 @@ export class ApexRankWatchRuntime {
       return [this.timeLine(), '\u2139\ufe0f \u672c\u7fa4\u76ee\u524d\u6ca1\u6709\u76d1\u63a7\u4efb\u4f55\u73a9\u5bb6\u3002'].join('\n')
     }
 
-    try {
-      const imagePath = await this.imageRenderer.renderWatchList(Object.values(group.players), this.imageRenderOptions())
-      return h.image(imagePath)
-    } catch (error) {
-      this.logger.error(`watch list image render failed: ${String((error as Error)?.message || error)}`)
-    }
+    const imageMessage = await this.tryRenderImageMessage(
+      () => this.imageRenderer.renderWatchList(Object.values(group.players), this.imageRenderOptions()),
+      'watch list image render failed',
+    )
+    if (imageMessage) return imageMessage
 
     const lines = [this.timeLine(), '\ud83d\udccb \u672c\u7fa4 Apex \u6392\u540d\u76d1\u63a7\u5217\u8868']
     let index = 0
@@ -1457,11 +1631,13 @@ export class ApexRankWatchRuntime {
         ...playerData,
         displayName,
       }
-      try {
-        const imagePath = await this.imageRenderer.renderRankChange(renderPlayer, oldScore, newScore, nextPlayerRecord.platform, seasonReset)
-        await this.sendToTarget(group.target, h.image(imagePath))
-      } catch (error) {
-        this.logger.error(`rank change image render failed: ${String((error as Error)?.message || error)}`)
+      const imageMessage = await this.tryRenderImageMessage(
+        () => this.imageRenderer.renderRankChange(renderPlayer, oldScore, newScore, nextPlayerRecord.platform, seasonReset),
+        'rank change image render failed',
+      )
+      if (imageMessage) {
+        await this.sendToTarget(group.target, imageMessage)
+      } else {
         await this.sendToTarget(group.target, lines.join('\n'))
       }
     } catch (error) {

@@ -284,6 +284,19 @@ export class BindingStore {
     return this.bindings[userId]
   }
 
+  findUserIdByLookup(lookupId: string, platform: string, useUid: boolean) {
+    const normalizedLookupId = String(lookupId || '').trim().toLowerCase()
+    const normalizedPlatform = normalizePlatform(platform || 'PC')
+    for (const record of Object.values(this.bindings)) {
+      if (!record) continue
+      if (String(record.lookupId || '').trim().toLowerCase() !== normalizedLookupId) continue
+      if (normalizePlatform(record.platform || 'PC') !== normalizedPlatform) continue
+      if (Boolean(record.useUid) !== Boolean(useUid)) continue
+      return record.userId
+    }
+    return ''
+  }
+
   set(record: UserBindingRecord) {
     this.bindings[record.userId] = { ...record }
   }

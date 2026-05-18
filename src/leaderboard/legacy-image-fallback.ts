@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises'
 import { h } from 'koishi'
 import type { LeaderboardRenderContext, LeaderboardRenderRequest } from './types'
 
@@ -10,5 +11,6 @@ export async function renderLegacyLeaderboardImage(
     directionLabel: request.directionLabel,
     periodRangeText: request.periodRangeText,
   })
-  return h.image(imagePath)
+  const imageBuffer = await readFile(imagePath)
+  return h.image(imageBuffer, 'image/png')
 }

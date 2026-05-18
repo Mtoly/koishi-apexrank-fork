@@ -4,6 +4,9 @@ import { ConfigSchema, resolveConfig } from './config'
 import { ApexRankWatchRuntime } from './runtime'
 
 export const name = 'apexrankwatch'
+export const inject = {
+  optional: ['puppeteer'],
+}
 export const Config = ConfigSchema
 export const usage = [
   '填写 Apex Legends API Key 后即可使用玩家查询、猎杀线和群监控功能。',
